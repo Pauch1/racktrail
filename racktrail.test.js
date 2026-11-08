@@ -3,17 +3,40 @@ import { once } from 'node:events';
 import { test } from 'node:test';
 
 process.env.DB_FILE = ':memory:';
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || '';
 process.env.GCASH_QR_URL = '/test-qr.png';
 process.env.NODE_ENV = 'test';
 process.env.COOKIE_SECURE = '0';
 const { app } = await import('./server.js');
-const { seed, all, run, shopDate, stockUsed } = await import('./store.js');
+const { seed, all, get, run, atomic, now, db, shopDate, stockUsed, close } = await import('./store.js');
 
 test('booking, staff review, return, reports and role boundaries', async t => {
-  seed();
+  await seed();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const rollback = atomic(async () => {
+    await run('INSERT INTO activity(actor,event,created) VALUES(?,?,?)','queue-test','rollback',now());
+    entered.resolve();
+    await release.promise;
+    throw new Error('Expected transaction rollback');
+  });
+  await entered.promise;
+  let readFinished = false;
+  const unrelatedRead = get("SELECT id FROM activity WHERE actor='queue-test'").then(row => {
+    readFinished = true;
+    return row;
+  });
+  await new Promise(setImmediate);
+  if (db) assert.equal(readFinished,false);
+  release.resolve();
+  await assert.rejects(rollback,/Expected transaction rollback/);
+  assert.equal(await unrelatedRead,undefined);
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  t.after(() => new Promise(resolve => server.close(resolve)));
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await close();
+  });
   const root = 'http://127.0.0.1:' + server.address().port + '/api';
 
   async function request(path, { method = 'GET', cookie = '', body, status = 200 } = {}) {
@@ -32,6 +55,7 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   }
 
   const today = shopDate();
+  assert.deepEqual((await request('/health')).data,{ok:true});
   const tomorrow = shopDate(Date.now() + 86400000);
   const afterTomorrow = shopDate(Date.now() + 2 * 86400000);
   const registration = { name:'New Customer', email:'new@racktrail.test', address:'Victoria', phone:'09123456789', password:'RackTrail123!' };
@@ -82,7 +106,7 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   await change(reserved,'verify');
   await change(reserved,'reserve');
   assert.equal((await request('/rentals',{cookie:customer})).data[0].displayStatus,'Reserved');
-  assert.equal(stockUsed(itemId,tomorrow,tomorrow),1);
+  assert.equal(await stockUsed(itemId,tomorrow,tomorrow),1);
 
   await request('/messages',{method:'POST',cookie:customer,body:{body:'Can I collect it tomorrow?'}});
   const [message] = (await request('/messages',{cookie:staff})).data;
@@ -94,14 +118,14 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   assert.equal(report.transactions,2);
   assert.equal(report.revenue,20000);
   assert.deepEqual(report.top,[['Test Gown',1]]);
-  assert.equal(all('SELECT id FROM reports').length,1);
+  assert.equal((await all('SELECT id FROM reports')).length,1);
   assert.ok((await request('/activity',{cookie:admin})).data.length >= 7);
 
   // A garment returned late still takes up physical stock until the staff records its return.
   const next = (await requestBooking(customer,{...form,start:afterTomorrow,due:afterTomorrow})).data.id;
   const yesterday = shopDate(Date.now()-86400000);
-  run("UPDATE rentals SET status='Active',start=?,due=? WHERE id=?",yesterday,yesterday,id);
-  assert.equal(stockUsed(itemId,afterTomorrow,afterTomorrow),2);
+  await run("UPDATE rentals SET status='Active',start=?,due=? WHERE id=?",yesterday,yesterday,id);
+  assert.equal(await stockUsed(itemId,afterTomorrow,afterTomorrow),2);
   assert.ok((await request('/notifications',{cookie:customer})).data.some(entry => entry.text.includes('overdue')));
   assert.ok(next > reserved);
 });

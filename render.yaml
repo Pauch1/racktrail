@@ -1,0 +1,33 @@
+databases:
+  - name: racktrail-db
+    databaseName: racktrail
+    user: racktrail
+    plan: free
+    region: oregon
+
+services:
+  - type: web
+    name: racktrail
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.13.1
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: racktrail-db
+          property: connectionString
+      - key: ADMIN_EMAIL
+        value: admin@racktrail.example
+      - key: ADMIN_PASSWORD
+        generateValue: true
