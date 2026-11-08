@@ -1,0 +1,23 @@
+{
+  "name": "racktrail",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node --test",
+    "dev": "vite",
+    "server": "node --env-file-if-exists=.env server.js",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "express": "^5.3.0",
+    "nodemailer": "^10.3.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.6"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "private": true
+}
