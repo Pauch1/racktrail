@@ -30,7 +30,11 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
   const open = row && ['Pending','Reserved'].includes(row.status);
   const pendingPayment = open && row.payment==='Pending';
   const gcash = row?.method==='GCash';
-  return <>{!embedded && <Title title={title} caption={shop ? 'Monitor customer rental and payment records.' : 'View your rental and reservation records.'}/>}
+  const currentDate = today();
+  const withinBookedDates = row && currentDate >= row.start && currentDate <= row.due;
+  return <>{!embedded && <Title title={title} caption={shop ? 'Monitor customer rental and payment records.' : 'View your rental and reservation records.'}>
+    {shop && <Button secondary onClick={refresh}>Refresh</Button>}
+  </Title>}
     <section className="panel padded">
       {embedded && <h2>{title}</h2>}
       {shop && <Field name="search" label="Search transactions" type="search" required={false} value={search} onChange={event => setSearch(event.target.value)}/>}
@@ -58,7 +62,7 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
       {receipt?.rentalId===row.id && <img className="receipt" src={receipt.image} alt="Uploaded GCash receipt"/>}
       <Feedback state={state}/>
       {shop && <div className="actions">
-        {pendingPayment && <Button disabled={state.busy} onClick={() => act(update('verify'))}>{gcash ? 'Verify Payment' : 'Record Cash Payment'}</Button>}
+        {pendingPayment && (gcash || withinBookedDates) && <Button disabled={state.busy} onClick={() => act(update('verify'))}>{gcash ? 'Verify Payment' : 'Record Cash Payment'}</Button>}
         {pendingPayment && <Button secondary disabled={state.busy} onClick={() => {
           if (confirm(gcash ? 'Reject payment and close this booking?' : 'Reject this booking?')) act(update(gcash ? 'reject-payment' : 'reject'));
         }}>{gcash ? 'Reject Payment' : 'Reject Booking'}</Button>}
@@ -66,6 +70,7 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
           <Button secondary disabled={state.busy} onClick={() => act(update('reserve'))}>Confirm Reservation</Button>}
         {open && row.payment==='Verified' && <Button disabled={state.busy} onClick={() => act(update('release'))}>Release Item</Button>}
       </div>}
+      {shop && pendingPayment && !gcash && !withinBookedDates && <p>Cash payment can be recorded within the booked dates.</p>}
       {shop && row.status==='Active' && <form className="stack return-form" onSubmit={submit(act,body => update('return',body)())}>
         <Field name="inspection" label="Return Inspection" multiline maxLength={1000}/>
         <Field name="penalty" label="Penalty (₱)" type="number" min={0} step="0.01" defaultValue={0}/>

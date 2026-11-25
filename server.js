@@ -89,6 +89,13 @@ function number(input, name, max, integer = true) {
   return value;
 }
 
+function recordId(value) {
+  need(typeof value === 'number' || typeof value === 'string', 'Choose a valid record ID.');
+  const id = Number(value);
+  need(/^\d+$/.test(String(value)) && id > 0 && id <= 2147483647, 'Choose a valid record ID.');
+  return id;
+}
+
 function email(input) {
   const value = field(input, 'email').toLowerCase();
   need(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value), 'Enter a valid email address.');
@@ -126,6 +133,7 @@ function route(method, path, allowed, action) {
       need(req.user, 'Log in to continue.', 401);
       need(allowed.includes(req.user.role), 'Your account cannot perform this action.', 403);
     }
+    if (req.params.id !== undefined) req.params.id = recordId(req.params.id);
     const result = await action(req, res);
     res.json(result ?? { ok: true });
   });
@@ -333,7 +341,7 @@ route('get', '/rentals', roles, async req => await all(rentalSelect + ' WHERE (?
 route('get', '/payment-config', customer, () => ({ qr: process.env.GCASH_QR_URL || '' }));
 route('post', '/rentals', customer, async req => {
   const body = req.body;
-  const itemId = number(body, 'itemId', Number.MAX_SAFE_INTEGER);
+  const itemId = recordId(body.itemId);
   const start = date(body, 'start');
   const due = date(body, 'due');
   const kind = field(body, 'kind');
@@ -377,22 +385,24 @@ route('get', '/rentals/:id/receipt', roles, async req => {
   return { receipt };
 });
 route('patch', '/rentals/:id', shop, async req => await atomic(async () => {
-  const rental = await get(rentalSelect + ' WHERE r.id=?', shopDate(), req.params.id);
+  const today = shopDate();
+  const rental = await get(rentalSelect + ' WHERE r.id=?', today, req.params.id);
   need(rental, 'Transaction not found.', 404);
   const { action } = req.body;
   const open = ['Pending', 'Reserved'].includes(rental.status);
   if (action === 'verify' || action === 'reject-payment') {
     need(open && rental.payment === 'Pending', 'This payment has already been reviewed.', 409);
     need(rental.method === 'GCash' || action === 'verify', 'Only submitted GCash payments can be rejected.');
+    need(rental.method !== 'Cash on Pickup' || (today >= rental.start && today <= rental.due),
+      'Record cash payment within the booked dates.', 409);
     await run('UPDATE payments SET state=?,paidAt=? WHERE rentalId=?',
       action === 'verify' ? 'Verified' : 'Rejected', action === 'verify' ? now() : null, rental.id);
     if (action === 'reject-payment') await run("UPDATE rentals SET status='Rejected' WHERE id=?", rental.id);
   } else if (action === 'reserve') {
-    need(rental.status === 'Pending' && rental.kind === 'Reserve' && rental.due >= shopDate() &&
+    need(rental.status === 'Pending' && rental.kind === 'Reserve' && rental.due >= today &&
       (rental.method === 'Cash on Pickup' || rental.payment === 'Verified'), 'This reservation is not ready to confirm.', 409);
     await run("UPDATE rentals SET status='Reserved' WHERE id=?", rental.id);
   } else if (action === 'release') {
-    const today = shopDate();
     need(open && rental.payment === 'Verified' && today >= rental.start && today <= rental.due,
       'Verify payment and release within the booked dates.', 409);
     const inUse = (await get("SELECT COUNT(*) AS count FROM rentals WHERE itemId=? AND status='Active'", rental.itemId)).count;
@@ -415,7 +425,7 @@ route('get', '/messages', roles, async req => await all(`SELECT m.*,u.name AS se
   JOIN users u ON u.id=m.senderId JOIN users s ON s.id=m.userId
   WHERE (?<>'customer' OR m.userId=?) ORDER BY m.id`, req.user.role, req.user.id));
 route('post', '/messages', roles, async req => {
-  const id = req.user.role === 'customer' ? req.user.id : number(req.body, 'userId', Number.MAX_SAFE_INTEGER);
+  const id = req.user.role === 'customer' ? req.user.id : recordId(req.body.userId);
   need(await get("SELECT id FROM users WHERE id=? AND role='customer'", id), 'Customer not found.', 404);
   await run('INSERT INTO messages(userId,senderId,body,created) VALUES(?,?,?,?)', id, req.user.id, field(req.body, 'body', 2000), now());
 });

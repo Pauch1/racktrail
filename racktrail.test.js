@@ -100,8 +100,10 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   const availability = '/items/'+itemId+'/availability?start='+today+'&due='+today;
   const quote = (await request(availability,{cookie:customer})).data;
   assert.deepEqual(quote,{available:1,total:10000});
+  await request(availability.replace('/'+itemId+'/', '/invalid/'),{cookie:customer,status:400});
   const form = {itemId,name:'Demo Customer',address:'Victoria',phone:'09123456789',kind:'Rent',start:today,due:today,method:'Cash on Pickup',total:quote.total};
   const requestBooking = (cookie, body, status=200) => request('/rentals',{method:'POST',cookie,body,status});
+  await requestBooking(customer,{...form,itemId:2147483648},400);
   await requestBooking(customer,{...form,total:9999},409);
   assert.deepEqual((await request('/rentals',{cookie:customer})).data,[]);
   const payload = {method:'POST',headers:{Cookie:customer,'Content-Type':'application/json'},body:JSON.stringify(form)};
@@ -110,8 +112,10 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   const {id} = await race.find(res => res.ok).json();
   await race.find(res => !res.ok).json();
   const change = (id, action, extra={}, status=200) => request('/rentals/'+id,{method:'PATCH',cookie:staff,body:{action,...extra},status});
+  await change('invalid','verify',{},400);
   await change(id,'release',{},409);
   await change(id,'verify');
+  await change(id,'verify',{},409);
   await change(id,'release');
   assert.deepEqual((await request('/rentals',{cookie:other})).data,[]);
   await request('/rentals/'+id,{method:'PATCH',cookie:customer,body:{action:'return'},status:403});
@@ -145,9 +149,15 @@ test('booking, staff review, return, reports and role boundaries', async t => {
 
   // A garment returned late still takes up physical stock until the staff records its return.
   const next = (await requestBooking(customer,{...form,start:afterTomorrow,due:afterTomorrow})).data.id;
+  await change(next,'verify',{},409);
   const yesterday = shopDate(Date.now()-86400000);
+  await run('UPDATE rentals SET start=?,due=? WHERE id=?',yesterday,yesterday,next);
+  await change(next,'verify',{},409);
+  await run('UPDATE rentals SET start=?,due=? WHERE id=?',afterTomorrow,afterTomorrow,next);
   await run("UPDATE rentals SET status='Active',start=?,due=? WHERE id=?",yesterday,yesterday,id);
   assert.equal(await stockUsed(itemId,afterTomorrow,afterTomorrow),2);
+  await change(next,'reject');
+  assert.equal(await stockUsed(itemId,afterTomorrow,afterTomorrow),1);
   assert.ok((await request('/notifications',{cookie:customer})).data.some(entry => entry.text.includes('overdue')));
   assert.ok(next > reserved);
   const password = '  New Password!  ';
