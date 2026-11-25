@@ -184,15 +184,17 @@ route('post', '/forgot', null, async req => {
   limit(req);
   const address = email(req.body);
   need((brevoKey || transport) && mailFrom && appUrl, 'Email recovery is unavailable. Contact the shop.', 503);
-  const user = await get('SELECT id,email FROM users WHERE email=? AND active=1', address);
-  if (!user) return;
   const secret = token();
   const key = digest(secret);
   const url = new URL('/?reset=' + secret, appUrl);
-  await atomic(async () => {
+  const user = await atomic(async () => {
+    const account = await get('SELECT id,email FROM users WHERE email=? AND active=1', address);
+    if (!account) return;
     await run('DELETE FROM resets WHERE expires<=?', Date.now());
-    await run('INSERT INTO resets VALUES(?,?,?)', key, user.id, Date.now() + 1800000);
+    await run('INSERT INTO resets VALUES(?,?,?)', key, account.id, Date.now() + 1800000);
+    return account;
   });
+  if (!user) return;
   try {
     await sendResetEmail(user.email, url);
   } catch (error) {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { test } from 'node:test';
 
@@ -151,12 +152,20 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   assert.ok(next > reserved);
   const password = '  New Password!  ';
   const reset = { token, password, confirm: password };
+  const expired = 'a'.repeat(64);
+  const account = await get('SELECT id FROM users WHERE email=?', registration.email);
+  await run('INSERT INTO resets VALUES(?,?,?)',
+    createHash('sha256').update(expired).digest('hex'), account.id, Date.now() - 1000);
+  await request('/reset', { method: 'POST', body: { ...reset, token: expired }, status: 400 });
+  await request('/reset', { method: 'POST', body: { ...reset, confirm: 'mismatch' }, status: 400 });
   await request('/reset', { method: 'POST', body: reset });
   await request('/reset', { method: 'POST', body: reset, status: 400 });
   await request('/items', { cookie: other, status: 401 });
   const { cookie: changed } = await request('/login', {
     method: 'POST', body: { email: registration.email, role: 'customer', password }
   });
+  await request('/password', { method: 'PATCH', cookie: changed, status: 400,
+    body: { 'current password': password.trim(), password: registration.password, confirm: registration.password } });
   await request('/password', { method: 'PATCH', cookie: changed,
     body: { 'current password': password, password: registration.password, confirm: registration.password } });
 });
