@@ -6,8 +6,6 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
   const [localFilter,setLocalFilter] = useState('All');
   const [search,setSearch] = useState('');
   const [selected,setSelected] = useState(null);
-  const [state,act] = useAction();
-  const [receipt,setReceipt] = useState(null);
   const shop = user.role!=='customer';
   const status = filter ?? localFilter;
   const history = title==='History';
@@ -18,20 +16,7 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
       (row.name+' '+row.itemName+' '+row.id).toLowerCase().includes(search.toLowerCase());
   });
   const row = data.data?.find(item => item.id===selected);
-  const show = id => { setSelected(id); setReceipt(null); };
-  const detailButton = row => <Button secondary onClick={() => show(row.id)}>{shop ? 'View' : 'View Details'}</Button>;
-  function update(action,body={}) {
-    return async () => {
-      await api('/rentals/'+row.id,'PATCH',{action,...body});
-      refresh();
-      return 'Transaction updated.';
-    };
-  }
-  const open = row && ['Pending','Reserved'].includes(row.status);
-  const pendingPayment = open && row.payment==='Pending';
-  const gcash = row?.method==='GCash';
-  const currentDate = today();
-  const withinBookedDates = row && currentDate >= row.start && currentDate <= row.due;
+  const detailButton = row => <Button secondary onClick={() => setSelected(row.id)}>{shop ? 'View' : 'View Details'}</Button>;
   return <>{!embedded && <Title title={title} caption={shop ? 'Monitor customer rental and payment records.' : 'View your rental and reservation records.'}>
     {shop && <Button secondary onClick={refresh}>Refresh</Button>}
   </Title>}
@@ -48,8 +33,27 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
           ['#'+item.id,item.itemName,item.kind,dateLabel(item.start)+' – '+dateLabel(item.due),money(item.total),
           <Badge>{item.displayStatus}</Badge>,detailButton(item)])}/>
     </section>
-    {row && <section className="panel padded transaction-detail" key={row.id}>
-      <div className="title-row"><h2>Transaction #{row.id} · {row.itemName}</h2><Button secondary onClick={() => show(null)}>Close</Button></div>
+    {row && <TransactionDetail key={row.id} row={row} shop={shop} refresh={refresh} onClose={() => setSelected(null)}/>}
+  </>;
+}
+
+function TransactionDetail({row,shop,refresh,onClose}) {
+  const [state,act] = useAction();
+  const [receipt,setReceipt] = useState(null);
+  function update(action,body={}) {
+    return async () => {
+      await api('/rentals/'+row.id,'PATCH',{action,...body});
+      refresh();
+      return 'Transaction updated.';
+    };
+  }
+  const open = ['Pending','Reserved'].includes(row.status);
+  const pendingPayment = open && row.payment==='Pending';
+  const gcash = row.method==='GCash';
+  const currentDate = today();
+  const withinBookedDates = currentDate >= row.start && currentDate <= row.due;
+  return <section className="panel padded transaction-detail">
+      <div className="title-row"><h2>Transaction #{row.id} · {row.itemName}</h2><Button secondary onClick={onClose}>Close</Button></div>
       <div className="actions"><Badge>{row.displayStatus}</Badge><Badge>{row.payment}</Badge></div>
       <p>{row.kind} · {dateLabel(row.start)} – {dateLabel(row.due)} · {money(row.total)} · {row.method}</p>
       <p>{row.name} · {row.phone} · {row.address}</p>
@@ -57,26 +61,27 @@ export function Transactions({user,version,refresh,title,embedded,filter,setFilt
       {row.returned && <p>Returned {dateLabel(row.returned)} · {row.inspection} · Penalty {money(row.penalty)}</p>}
       {row.hasReceipt && <Button secondary disabled={state.busy} onClick={() => act(async () => {
         const {receipt: image} = await api('/rentals/'+row.id+'/receipt');
-        setReceipt({rentalId:row.id,image});
+        setReceipt(image);
       })}>View Receipt</Button>}
-      {receipt?.rentalId===row.id && <img className="receipt" src={receipt.image} alt="Uploaded GCash receipt"/>}
+      {receipt && <img className="receipt" src={receipt} alt="Uploaded GCash receipt"/>}
       <Feedback state={state}/>
       {shop && <div className="actions">
         {pendingPayment && (gcash || withinBookedDates) && <Button disabled={state.busy} onClick={() => act(update('verify'))}>{gcash ? 'Verify Payment' : 'Record Cash Payment'}</Button>}
         {pendingPayment && <Button secondary disabled={state.busy} onClick={() => {
           if (confirm(gcash ? 'Reject payment and close this booking?' : 'Reject this booking?')) act(update(gcash ? 'reject-payment' : 'reject'));
         }}>{gcash ? 'Reject Payment' : 'Reject Booking'}</Button>}
-        {open && row.status==='Pending' && row.kind==='Reserve' && (!gcash || row.payment==='Verified') &&
+        {row.status==='Pending' && row.kind==='Reserve' && currentDate <= row.due && (!gcash || row.payment==='Verified') &&
           <Button secondary disabled={state.busy} onClick={() => act(update('reserve'))}>Confirm Reservation</Button>}
-        {open && row.payment==='Verified' && <Button disabled={state.busy} onClick={() => act(update('release'))}>Release Item</Button>}
+        {open && row.payment==='Verified' && withinBookedDates &&
+          <Button disabled={state.busy} onClick={() => act(update('release'))}>Release Item</Button>}
       </div>}
       {shop && pendingPayment && !gcash && !withinBookedDates && <p>Cash payment can be recorded within the booked dates.</p>}
+      {shop && open && row.payment==='Verified' && !withinBookedDates && <p>The item can be released within the booked dates.</p>}
       {shop && row.status==='Active' && <form className="stack return-form" onSubmit={submit(act,body => update('return',body)())}>
         <Field name="inspection" label="Return Inspection" multiline maxLength={1000}/>
         <Field name="penalty" label="Penalty (₱)" type="number" min={0} step="0.01" defaultValue={0}/>
         <Button type="submit" disabled={state.busy}>Mark Returned</Button></form>}
-    </section>}
-  </>;
+    </section>;
 }
 
 export function Reports() {

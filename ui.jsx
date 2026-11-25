@@ -1,11 +1,14 @@
-import React, {useEffect,useId,useState} from 'react';
+import React, {useEffect,useId,useRef,useState} from 'react';
 
 export async function api(path, method = 'GET', body = {}) {
   const response = await fetch('/api' + path, method === 'GET' ? {} : {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Something went wrong.');
+  if (response.status === 401 && path !== '/login') {
+    window.dispatchEvent(new Event('racktrail:session-expired'));
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) throw new Error(data?.error || 'RackTrail could not complete the request. Please try again.');
   return data;
 }
 export const categories = ['Gowns','Suits','Dresses','Skirts','Barongs','Blouses','Accessories'];
@@ -32,10 +35,14 @@ export function useData(path, version = 0) {
 }
 export function useAction() {
   const [state,setState] = useState({});
+  const running = useRef(false);
   async function act(work) {
+    if (running.current) return;
+    running.current = true;
     setState({busy:true});
     try { setState({message:await work()}); }
     catch (error) { setState({error:error.message}); }
+    finally { running.current = false; }
   }
   return [state,act];
 }

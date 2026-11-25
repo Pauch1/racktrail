@@ -1,14 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Account, Catalog, Booking, Transactions, Inventory, Users, Messages, Reports, Profile, Settings, Stats, Table, dateLabel, Badge, Button, useData } from './screens.jsx';
 import './style.css';
 
-import { api } from './ui.jsx';
+import { api, useAction } from './ui.jsx';
 
 const customerNav = ['Dashboard', 'Items', 'My Rent/Reservation', 'History', 'Message'];
 const staffNav = ['Dashboard', 'Items', 'Customers', 'Transaction', 'Reports', 'Message', 'Profile'];
 const adminNav = ['Dashboard', 'Users', 'Items', 'Reports', 'Settings', 'Profile'];
 const publicNav = ['Home', 'About Us', 'FAQs', 'Login'];
+const publicPages = [...publicNav, 'Create Account', 'Forgot Password'];
 const pathFor = page => '#' + encodeURIComponent(page);
 const currentPage = () => {
   try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; }
@@ -24,8 +25,15 @@ function App() {
   const [version, setVersion] = useState(0);
   const [menu, setMenu] = useState(false);
   const [loginRole, setLoginRole] = useState('customer');
+  const [logoutState, endSession] = useAction();
   const resetToken = new URLSearchParams(location.search).get('reset');
   const refresh = () => setVersion(value => value + 1);
+  const clearPortal = useCallback(() => {
+    setSelected(null);
+    setBooking(null);
+    setFilter('All');
+    setMenu(false);
+  }, []);
   const go = (next, keepNotice = false) => {
     if (!keepNotice) setNotice('');
     setMenu(false);
@@ -41,22 +49,73 @@ function App() {
       if (next !== 'Login') setLoginRole('customer');
     };
     window.addEventListener('hashchange', change);
-    api('/me').then(data => setUser(data.id ? data : null)).catch(error => { setUser(null); setNotice(error.message); });
     return () => window.removeEventListener('hashchange', change);
   }, []);
-  async function logout() {
-    try {
-      await api('/logout', 'POST');
-      setUser(null);
-      setSelected(null);
-      setBooking(null);
-      setFilter('All');
-      go('Home');
-    } catch (error) { setNotice(error.message); }
+  const loadingSession = user === undefined;
+  const activeUserId = user?.id;
+  const activeRole = user?.role;
+  useEffect(() => {
+    let active = true;
+    let sequence = 0;
+    async function checkSession(event) {
+      if (event?.type === 'visibilitychange' && document.hidden) return;
+      const request = ++sequence;
+      try {
+        const data = await api('/me');
+        if (!active || request !== sequence) return;
+        if (loadingSession) {
+          setUser(data.id ? data : null);
+          const next = currentPage();
+          if (!data.id && next && !publicPages.includes(next) && !location.search) {
+            history.replaceState(null, '', '#Login');
+            setPage('Login');
+            setNotice('Please log in to open that page.');
+          }
+        } else if (data.id !== activeUserId || data.role !== activeRole) {
+          clearPortal();
+          const next = data.id ? 'Dashboard' : 'Login';
+          if (!data.id) setLoginRole(activeRole);
+          history.replaceState(null, '', pathFor(next));
+          setPage(next);
+          setNotice(data.id ? 'The signed-in account changed in another tab.' : 'Your session ended. Please log in again.');
+          setUser(data.id ? data : null);
+          window.scrollTo(0, 0);
+        }
+      } catch (error) {
+        if (active && request === sequence && loadingSession) {
+          setUser(null);
+          setNotice(error.message);
+        }
+      }
+    }
+    if (loadingSession) checkSession();
+    if (activeUserId) {
+      window.addEventListener('racktrail:session-expired', checkSession);
+      window.addEventListener('focus', checkSession);
+      window.addEventListener('pageshow', checkSession);
+      document.addEventListener('visibilitychange', checkSession);
+    }
+    return () => {
+      active = false;
+      window.removeEventListener('racktrail:session-expired', checkSession);
+      window.removeEventListener('focus', checkSession);
+      window.removeEventListener('pageshow', checkSession);
+      document.removeEventListener('visibilitychange', checkSession);
+    };
+  }, [activeUserId, activeRole, loadingSession, clearPortal]);
+  function logout() {
+    endSession(async () => {
+      try {
+        await api('/logout', 'POST');
+        setUser(null);
+        clearPortal();
+        go('Home');
+      } catch (error) { setNotice(error.message); }
+    });
   }
   if (user === undefined) return <main className="public-content" aria-live="polite">Loading RackTrail…</main>;
   if (!user || resetToken) {
-    const view = resetToken ? 'Reset Password' : [...publicNav, 'Create Account', 'Forgot Password'].includes(page) ? page : 'Home';
+    const view = resetToken ? 'Reset Password' : publicPages.includes(page) ? page : 'Home';
     const isPublic = publicNav.slice(0, 3).includes(view);
     const home = resetToken ? '/' : '#Home';
     return <>
@@ -76,7 +135,9 @@ function App() {
     </>;
   }
   const nav = user.role === 'customer' ? customerNav : user.role === 'staff' ? staffNav : adminNav;
-  let view = [...nav, 'Notifications', 'Profile', 'Settings', 'Item Details', 'Rent Form', 'Payment Method', ...(user.role === 'admin' ? ['Transaction', 'Message'] : [])].includes(page) ? page : 'Dashboard';
+  const rolePages = user.role === 'customer' ? ['Item Details', 'Rent Form', 'Payment Method'] :
+    user.role === 'admin' ? ['Transaction', 'Message'] : [];
+  let view = [...nav, 'Notifications', 'Profile', 'Settings', ...rolePages].includes(page) ? page : 'Dashboard';
   if ((view === 'Item Details' && !selected) || (['Rent Form', 'Payment Method'].includes(view) && !booking)) view = 'Items';
   if (view === 'Payment Method' && !booking.start) view = 'Rent Form';
   const startBooking = (item, kind) => {
@@ -99,7 +160,7 @@ function App() {
     Reports: <Reports/>,
     Profile: <Profile user={user} setUser={setUser} go={go}/>,
     Settings: <Settings user={user} setUser={setUser} go={go}/>,
-    Notifications: <Notifications version={version}/>
+    Notifications: <Notifications version={version} refresh={refresh}/>
   }[view];
   return <>
     <header className="portal-header">
@@ -107,16 +168,16 @@ function App() {
       <nav aria-label="Account"><Badge>{user.role === 'admin' ? 'Admin' : user.role === 'staff' ? 'Staff' : 'Customer'}</Badge>
         <a href="#Notifications">Notifications</a><details key={view}><summary>My Account
           <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-        </summary><div className="account-menu"><a href="#Profile">Profile</a><a href="#Settings">Settings</a><button type="button" className="plain" onClick={logout}>Logout</button></div></details>
+        </summary><div className="account-menu"><a href="#Profile">Profile</a><a href="#Settings">Settings</a><button type="button" className="plain" disabled={logoutState.busy} onClick={logout}>Logout</button></div></details>
       </nav>
     </header>
     <div className="portal">
       <aside id="sidebar" className={menu ? 'open' : ''}><a className="brand" href="#Dashboard">RackTrail</a>
         <nav aria-label="Portal navigation">{nav.map(item => <a key={item} aria-current={view === item ? 'page' : undefined} className={view === item ? 'chosen' : ''} href={pathFor(item)} onClick={() => { setMenu(false); setNotice(''); }}>{item}</a>)}
-          <button className="plain logout" type="button" onClick={logout}>Logout</button>
+          <button className="plain logout" type="button" disabled={logoutState.busy} onClick={logout}>Logout</button>
         </nav>
       </aside>
-      <main className="workspace" key={view}>
+      <main className="workspace" key={user.id + ':' + view}>
         {notice && <p className="notice" role="status">{notice}</p>}
         {screen}
       </main>
@@ -179,9 +240,10 @@ function Dashboard({ user, version, filter, setFilter, go }) {
   </>;
 }
 
-function Notifications({ version }) {
+function Notifications({ version, refresh }) {
   const data = useData('/notifications', version);
-  return <><h1>Notifications</h1><section className="panel padded">
+  return <><div className="title-row"><h1>Notifications</h1><Button secondary onClick={refresh}>Refresh</Button></div>
+    <section className="panel padded" aria-live="polite">
     {data.error ? <p role="alert" className="error">{data.error}</p> : !data.data ? <p>Loading…</p> : data.data.length ?
       <ul>{data.data.map(item => <li key={item.id}>{item.text}</li>)}</ul> : <p>No notifications.</p>}
   </section></>;

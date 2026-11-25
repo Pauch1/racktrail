@@ -8,12 +8,25 @@ import { all, get, run, db, atomic, now, shopDate, hash, verify, seed, userColum
 
 export const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '6mb' }));
-app.use('/api', async (req, res, next) => {
+app.use((_req, res, next) => {
+  res.set({
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff'
+  });
+  next();
+});
+app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
-  if (!['GET', 'HEAD'].includes(req.method) && !req.is('application/json')) {
-    return res.status(415).json({ error: 'Send a JSON request.' });
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    const fetchSite = req.get('Sec-Fetch-Site');
+    if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) {
+      return res.status(403).json({ error: 'Open RackTrail directly to make changes.' });
+    }
+    if (!req.is('application/json')) return res.status(415).json({ error: 'Send a JSON request.' });
   }
+  next();
+}, express.json({ limit: '6mb' }), async (req, res, next) => {
   if (!['GET', 'HEAD'].includes(req.method) && (!req.body || Array.isArray(req.body))) {
     return res.status(400).json({ error: 'Send a JSON object.' });
   }
@@ -170,18 +183,20 @@ route('post', '/register', null, async req => {
 });
 route('post', '/login', null, async (req, res) => {
   limit(req);
-  const user = await get('SELECT * FROM users WHERE email=?', email(req.body));
+  const address = email(req.body);
   const password = req.body.password;
-  need(typeof password === 'string' && password.length <= 128 && user?.active &&
-    user.role === req.body.role && verify(password, user.password), 'Email, password, or selected role is incorrect.', 401);
   const session = token();
-  await atomic(async () => {
+  const profile = await atomic(async () => {
+    const user = await get('SELECT * FROM users WHERE email=?', address);
+    need(typeof password === 'string' && password.length <= 128 && user?.active &&
+      user.role === req.body.role && verify(password, user.password), 'Email, password, or selected role is incorrect.', 401);
     await run('DELETE FROM sessions WHERE expires<=? OR token=?', Date.now(), req.token ? digest(req.token) : '');
     await run('INSERT INTO sessions VALUES(?,?,?)', digest(session), user.id, Date.now() + 86400000 * 7);
     await log(user.name, 'Signed in');
+    return await selectUser(user.id);
   });
   res.cookie('racktrail', session, { ...cookie, maxAge: 86400000 * 7 });
-  return await selectUser(user.id);
+  return profile;
 });
 route('get', '/me', null, async req => req.user ?? { user: null });
 route('post', '/logout', null, async (req, res) => {
@@ -431,15 +446,42 @@ route('post', '/messages', roles, async req => {
 });
 route('get', '/activity', ['admin'], async () => await all('SELECT * FROM activity ORDER BY id DESC LIMIT 20'));
 route('get', '/notifications', roles, async req => {
+  if (!req.user.reminders) return [];
+  const customerView = req.user.role === 'customer';
   const today = shopDate();
   const tomorrow = shopDate(Date.now() + 86400000);
-  return req.user.reminders ? (await all(rentalSelect + ` WHERE (?<>'customer' OR r.userId=?)
-    AND ((r.status='Active' AND r.due<=?) OR (r.status<>'Returned' AND p.method='GCash' AND p.state<>'Pending'))
-    ORDER BY r.id DESC LIMIT 30`, today, req.user.role, req.user.id, tomorrow)).map(row => ({
-      id: row.id, text: row.status === 'Active' && row.due <= tomorrow
-        ? `${row.itemName} is ${row.due < today ? 'overdue' : 'due ' + row.due}.`
-        : `${row.itemName} GCash payment: ${row.payment.toLowerCase()}.`
-    })) : [];
+  const recent = shopDate(Date.now() - 7 * 86400000);
+  const bookingFilter = customerView
+    ? `(r.status IN ('Pending','Reserved','Rejected') AND r.due>=?)
+      OR (r.status IN ('Pending','Reserved') AND (p.state='Verified' OR p.method='GCash'))`
+    : `r.status='Pending' OR (r.status='Reserved' AND r.start<=?)`;
+  const rows = await all(rentalSelect + ` WHERE (?<>'customer' OR r.userId=?)
+    AND ((r.status='Active' AND r.due<=?) OR ${bookingFilter})
+    ORDER BY CASE WHEN r.status='Active' THEN 0 ELSE 1 END,
+      CASE WHEN r.status='Active' THEN r.due END, r.id DESC LIMIT 30`,
+    today, req.user.role, req.user.id, tomorrow, customerView ? recent : today);
+  return rows.map(row => {
+    const booking = `${row.itemName} (#${row.id})`;
+    const paymentDecision = row.method === 'GCash' ? 'GCash payment verified' : 'Cash payment recorded';
+    let text;
+    if (row.status === 'Active') {
+      text = `${booking} is ${row.due < today ? 'overdue' : 'due ' + row.due}.`;
+    } else if (row.status === 'Rejected') {
+      text = row.method === 'GCash' ? `GCash payment for ${booking} was rejected.` : `The shop declined the request for ${booking}.`;
+    } else if (row.due < today) {
+      text = `The pickup window for ${booking} has ended. ${customerView ? 'Contact the shop for help.' : 'Review the booking and its payment status.'}`;
+    } else if (row.status === 'Reserved') {
+      text = `Reservation confirmed for ${booking}. Pickup starts ${row.start}.`;
+      if (row.payment === 'Verified') text += ` ${paymentDecision}.`;
+    } else if (row.payment === 'Verified') {
+      text = `${paymentDecision} for ${booking}.`;
+    } else if (row.method === 'GCash') {
+      text = `GCash payment for ${booking} is awaiting review.`;
+    } else {
+      text = `Booking request for ${booking} is pending.`;
+    }
+    return { id: row.id, text };
+  });
 });
 route('post', '/reports', shop, async req => {
   const from = date(req.body, 'from');

@@ -43,14 +43,14 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   });
   const root = 'http://127.0.0.1:' + server.address().port + '/api';
 
-  async function request(path, { method = 'GET', cookie = '', body, status = 200 } = {}) {
+  async function request(path, { method = 'GET', cookie = '', body, status = 200, headers = {} } = {}) {
     const response = await fetch(root + path, {
-      method, headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      method, headers: { Cookie: cookie, 'Content-Type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
     const data = await response.json();
     assert.equal(response.status, status, JSON.stringify(data));
-    return { data, cookie: response.headers.get('Set-Cookie')?.split(';')[0] };
+    return { data, cookie: response.headers.get('Set-Cookie')?.split(';')[0], headers: response.headers };
   }
   async function login(role, address = role + '@racktrail.test') {
     return (await request('/login', { method: 'POST', body: {
@@ -111,26 +111,35 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   assert.deepEqual(race.map(res => res.status).sort(),[200,409]);
   const {id} = await race.find(res => res.ok).json();
   await race.find(res => !res.ok).json();
+  const notifications = async cookie => (await request('/notifications',{cookie})).data;
+  assert.match((await notifications(customer)).find(notice => notice.id === id).text, /pending/i);
+  assert.deepEqual(await notifications(other), []);
   const change = (id, action, extra={}, status=200) => request('/rentals/'+id,{method:'PATCH',cookie:staff,body:{action,...extra},status});
   await change('invalid','verify',{},400);
   await change(id,'release',{},409);
   await change(id,'verify');
+  assert.match((await notifications(customer)).find(notice => notice.id === id).text, /cash payment recorded/i);
   await change(id,'verify',{},409);
   await change(id,'release');
   assert.deepEqual((await request('/rentals',{cookie:other})).data,[]);
   await request('/rentals/'+id,{method:'PATCH',cookie:customer,body:{action:'return'},status:403});
   await change(id,'return',{inspection:'Good condition',penalty:0});
+  assert.ok(!(await notifications(customer)).some(notice => notice.id === id));
   assert.equal((await request(availability,{cookie:customer})).data.available,1);
   await change(id,'return',{inspection:'Duplicate',penalty:0},409);
 
   const receipt = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+audsAAAAASUVORK5CYII=';
   const reserve = {...form,kind:'Reserve',start:tomorrow,due:tomorrow,method:'GCash',reference:'TEST-REF',receipt};
   const reserved = (await requestBooking(customer,reserve)).data.id;
+  assert.match((await notifications(staff)).find(notice => notice.id === reserved).text, /GCash.*awaiting review/);
   await requestBooking(other,{...reserve,start:afterTomorrow,due:afterTomorrow},409);
   await request('/rentals/'+reserved+'/receipt',{cookie:other,status:404});
   assert.equal((await request('/rentals/'+reserved+'/receipt',{cookie:staff})).data.receipt,receipt);
   await change(reserved,'verify');
   await change(reserved,'reserve');
+  const confirmation = (await notifications(customer)).find(notice => notice.id === reserved).text;
+  assert.match(confirmation, /Reservation confirmed/);
+  assert.match(confirmation, /GCash payment verified/);
   assert.equal((await request('/rentals',{cookie:customer})).data[0].displayStatus,'Reserved');
   assert.equal(await stockUsed(itemId,tomorrow,tomorrow),1);
 
@@ -153,12 +162,22 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   const yesterday = shopDate(Date.now()-86400000);
   await run('UPDATE rentals SET start=?,due=? WHERE id=?',yesterday,yesterday,next);
   await change(next,'verify',{},409);
+  assert.match((await notifications(customer)).find(notice => notice.id === next).text, /pickup window.*ended/i);
   await run('UPDATE rentals SET start=?,due=? WHERE id=?',afterTomorrow,afterTomorrow,next);
   await run("UPDATE rentals SET status='Active',start=?,due=? WHERE id=?",yesterday,yesterday,id);
   assert.equal(await stockUsed(itemId,afterTomorrow,afterTomorrow),2);
   await change(next,'reject');
   assert.equal(await stockUsed(itemId,afterTomorrow,afterTomorrow),1);
-  assert.ok((await request('/notifications',{cookie:customer})).data.some(entry => entry.text.includes('overdue')));
+  assert.match((await notifications(customer)).find(notice => notice.id === next).text, /declined/i);
+  assert.ok(!(await notifications(staff)).some(notice => notice.id === next));
+  const older = shopDate(Date.now()-8*86400000);
+  await run('UPDATE rentals SET start=?,due=? WHERE id=?',older,older,next);
+  assert.ok(!(await notifications(customer)).some(notice => notice.id === next));
+  assert.match((await notifications(customer)).find(notice => notice.id === id).text, /overdue/i);
+  await request('/settings',{method:'PATCH',cookie:customer,body:{reminders:false}});
+  assert.deepEqual(await notifications(customer), []);
+  await request('/settings',{method:'PATCH',cookie:customer,body:{reminders:true}});
+  assert.match((await notifications(customer)).find(notice => notice.id === id).text, /overdue/i);
   assert.ok(next > reserved);
   const password = '  New Password!  ';
   const reset = { token, password, confirm: password };
@@ -178,4 +197,23 @@ test('booking, staff review, return, reports and role boundaries', async t => {
     body: { 'current password': password.trim(), password: registration.password, confirm: registration.password } });
   await request('/password', { method: 'PATCH', cookie: changed,
     body: { 'current password': password, password: registration.password, confirm: registration.password } });
+
+  const health = await request('/health');
+  assert.equal(health.headers.get('Referrer-Policy'), 'no-referrer');
+  assert.match(health.headers.get('Content-Security-Policy'), /frame-ancestors 'none'/);
+  assert.equal(health.headers.get('Cache-Control'), 'no-store');
+  await request('/logout', { method: 'POST', cookie: changed, body: {}, status: 403,
+    headers: { 'Sec-Fetch-Site': 'cross-site' } });
+  assert.equal((await request('/me', { cookie: changed })).data.email, registration.email);
+  const auth = await request('/login', { method: 'POST', cookie: changed,
+    body: { email: registration.email, role: 'customer', password: registration.password } });
+  assert.match(auth.headers.get('Set-Cookie'), /HttpOnly; SameSite=Strict/);
+  await request('/items', { cookie: changed, status: 401 });
+  const sessionHash = createHash('sha256').update(auth.cookie.slice('racktrail='.length)).digest('hex');
+  await run('UPDATE sessions SET expires=? WHERE token=?', Date.now() - 1000, sessionHash);
+  assert.deepEqual((await request('/me', { cookie: auth.cookie })).data, { user: null });
+  await request('/items', { cookie: auth.cookie, status: 401 });
+  const loggedOut = await login('customer', registration.email);
+  await request('/logout', { method: 'POST', cookie: loggedOut, body: {} });
+  await request('/items', { cookie: loggedOut, status: 401 });
 });
