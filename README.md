@@ -38,7 +38,8 @@ Set variables in a local `.env` file. Keep it and the database private.
 | Variable | Purpose |
 | --- | --- |
 | `GCASH_QR_URL` | Trusted HTTPS image URL or app-relative path for the shop’s real GCash QR. Leave unset to disable GCash. |
-| `SMTP_URL`, `MAIL_FROM`, `APP_URL` | Enable emailed password reset links. `APP_URL` is the app’s public origin. |
+| `BREVO_API_KEY`, `MAIL_FROM`, `APP_URL` | Enable password reset email over HTTPS. Use a verified Brevo sender and the app’s public origin. |
+| `SMTP_URL` | Optional SMTP fallback when a Brevo key is absent. |
 | `BACKUP_DIR` | Enables daily SQLite snapshots while the server is running. Keeps 14 snapshots. |
 | `DB_FILE` | SQLite file path. Defaults to `data/racktrail.sqlite`. |
 | `DATABASE_URL` | PostgreSQL connection URL. When set, all application records use PostgreSQL instead of the local SQLite file. |
@@ -46,7 +47,7 @@ Set variables in a local `.env` file. Keep it and the database private.
 | `NODE_ENV=production`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Initialize a fresh shop database with an administrator and without demo data. Use a dedicated database file. |
 | `COOKIE_SECURE=1` | Sends session cookies only over HTTPS. Enable behind the shop’s HTTPS host. |
 
-To restore a snapshot, stop the server and point `DB_FILE` at a private copy of the snapshot, then restart. Password recovery requires SMTP credentials and GCash requires the shop’s real QR. The local demo has neither configured.
+To restore a snapshot, stop the server and point `DB_FILE` at a private copy of the snapshot, then restart. Password recovery requires mail configuration and GCash requires the shop’s real QR. The local demo has neither configured.
 
 ## Deploy on Render
 
@@ -54,6 +55,6 @@ Use the repository’s `render.yaml` as a Render Blueprint. It provisions a free
 
 The first administrator uses `admin@racktrail.example`. Render generates its private `ADMIN_PASSWORD` environment variable. Retrieve that value from the service’s Environment page. Hosted setup starts with an empty catalog and creates no local demo accounts. Add shop inventory and staff through the administrator portal.
 
-The free web service sleeps after 15 minutes of inactivity. PostgreSQL records survive application restarts, but Render’s free database expires after 30 days. Export a PostgreSQL backup before expiration. SQLite’s `BACKUP_DIR` setting applies only to local SQLite databases. Free Render services block common SMTP ports, so password-recovery email requires a supported mail delivery setup.
+The free web service sleeps after 15 minutes of inactivity. PostgreSQL records survive application restarts, but Render’s free database expires after 30 days. Export a PostgreSQL backup before expiration. SQLite’s `BACKUP_DIR` setting applies only to local SQLite databases. Set `BREVO_API_KEY`, `MAIL_FROM`, and `APP_URL` in the Render service’s Environment settings to send password recovery email over HTTPS.
 
 See [Render’s free service limits](https://render.com/docs/free).

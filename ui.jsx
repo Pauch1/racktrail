@@ -65,11 +65,28 @@ export function Feedback({state}) {
   if (state.error) return <p className="error" role="alert">{state.error}</p>;
   if (state.message) return <p className="notice" role="status">{state.message}</p>;
 }
-export function Field({label,name,options,multiline,required=true,...props}) {
+export function Field({label,name,options,multiline,required=true,type,...props}) {
   const id = useId();
+  const [visible, setVisible] = useState(false);
+  if (type === 'password') return <div className="field">
+    <label htmlFor={id}>{label}</label>
+    <div className="password-input">
+      <input id={id} name={name} type={visible ? 'text' : 'password'} required={required}
+        maxLength={128} spellCheck={false} autoCapitalize="none" {...props}/>
+      <button type="button" aria-label={(visible ? 'Hide ' : 'Show ') + label.toLowerCase()}
+        onClick={() => setVisible(!visible)}>
+        <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+          strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/>
+          <circle cx="12" cy="12" r="2.5"/>
+          {visible && <path d="m3 3 18 18"/>}
+        </svg>
+      </button>
+    </div>
+  </div>;
   return <div className="field"><label htmlFor={id}>{label}</label>{options ? <select id={id} name={name} required={required} {...props}>
     {options.map(option => <option key={option}>{option}</option>)}</select> : multiline ?
-    <textarea id={id} name={name} required={required} {...props}/> : <input id={id} name={name} required={required} {...props}/>}</div>;
+    <textarea id={id} name={name} required={required} {...props}/> : <input id={id} name={name} type={type} required={required} {...props}/>}</div>;
 }
 export function Upload({name,label,required=false}) {
   return <Field type="file" name={name} label={label} required={required} accept="image/png,image/jpeg,image/webp"/>;

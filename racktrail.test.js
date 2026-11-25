@@ -7,6 +7,9 @@ process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || '';
 process.env.GCASH_QR_URL = '/test-qr.png';
 process.env.NODE_ENV = 'test';
 process.env.COOKIE_SECURE = '0';
+process.env.BREVO_API_KEY = 'test-brevo-key';
+process.env.MAIL_FROM = 'sender@racktrail.test';
+process.env.APP_URL = 'https://racktrail.test';
 const { app } = await import('./server.js');
 const { seed, all, get, run, atomic, now, db, shopDate, stockUsed, close } = await import('./store.js');
 
@@ -63,6 +66,24 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   await request('/register', { method:'POST', body:{...registration,confirm:registration.password,role:'admin'} });
   const customer = await login('customer');
   const other = await login('customer', registration.email);
+  const originalFetch = globalThis.fetch;
+  const mail = [];
+  let mailStatus = 201;
+  t.mock.method(globalThis, 'fetch', (url, options) => {
+    if (url !== 'https://api.brevo.com/v3/smtp/email') return originalFetch(url, options);
+    assert.equal(options.headers['api-key'], 'test-brevo-key');
+    mail.push(JSON.parse(options.body));
+    return Promise.resolve(new Response(null, { status: mailStatus }));
+  });
+  const forgot = email => request('/forgot', { method: 'POST', body: { email } });
+  await forgot('missing@racktrail.test');
+  assert.equal(mail.length, 0);
+  await forgot(registration.email);
+  assert.equal(mail[0].to[0].email, registration.email);
+  const token = new URL(mail[0].textContent.match(/https:\/\/\S+$/)[0]).searchParams.get('reset');
+  mailStatus = 503;
+  assert.deepEqual((await forgot(registration.email)).data, { ok: true });
+  assert.equal((await all('SELECT token FROM resets')).length, 1);
   const staff = await login('staff');
   const admin = await login('admin');
   await request('/items', {status:401});
@@ -128,4 +149,14 @@ test('booking, staff review, return, reports and role boundaries', async t => {
   assert.equal(await stockUsed(itemId,afterTomorrow,afterTomorrow),2);
   assert.ok((await request('/notifications',{cookie:customer})).data.some(entry => entry.text.includes('overdue')));
   assert.ok(next > reserved);
+  const password = '  New Password!  ';
+  const reset = { token, password, confirm: password };
+  await request('/reset', { method: 'POST', body: reset });
+  await request('/reset', { method: 'POST', body: reset, status: 400 });
+  await request('/items', { cookie: other, status: 401 });
+  const { cookie: changed } = await request('/login', {
+    method: 'POST', body: { email: registration.email, role: 'customer', password }
+  });
+  await request('/password', { method: 'PATCH', cookie: changed,
+    body: { 'current password': password, password: registration.password, confirm: registration.password } });
 });

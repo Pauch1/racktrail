@@ -33,6 +33,28 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const cookie = { httpOnly: true, sameSite: 'strict', secure: process.env.COOKIE_SECURE === '1', path: '/' };
 const log = async (actor, event) => await run('INSERT INTO activity(actor,event,created) VALUES(?,?,?)', actor, event, now());
 const transport = process.env.SMTP_URL ? nodemailer.createTransport(process.env.SMTP_URL) : null;
+const brevoKey = process.env.BREVO_API_KEY;
+const mailFrom = process.env.MAIL_FROM;
+const appUrl = process.env.APP_URL;
+
+async function sendResetEmail(to, url) {
+  const subject = 'Reset your RackTrail password';
+  const message = `Open this link within 30 minutes to reset your RackTrail password: ${url}`;
+  if (!brevoKey) {
+    await transport.sendMail({ from: mailFrom, to, subject, text: message });
+    return;
+  }
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': brevoKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sender: { name: 'RackTrail', email: mailFrom },
+      to: [{ email: to }], subject, textContent: message
+    }),
+    signal: AbortSignal.timeout(10000)
+  });
+  if (!response.ok) throw new Error(`Brevo returned HTTP ${response.status}`);
+}
 
 function need(condition, message, status = 400) {
   if (!condition) throw Object.assign(new Error(message), { status });
@@ -78,6 +100,11 @@ function newPassword(input) {
   need(typeof value === 'string' && value.length >= 8 && value.length <= 128, 'Use 8 to 128 characters for the password.');
   need(value === input.confirm, 'Passwords must match.');
   return hash(value);
+}
+
+function verifyCurrentPassword(input, saved) {
+  const value = input['current password'];
+  return typeof value === 'string' && value.length <= 128 && verify(value, saved);
 }
 
 function image(value, required = false) {
@@ -156,17 +183,22 @@ route('post', '/logout', null, async (req, res) => {
 route('post', '/forgot', null, async req => {
   limit(req);
   const address = email(req.body);
-  need(transport && process.env.MAIL_FROM && process.env.APP_URL, 'Email recovery is unavailable. Contact the shop.', 503);
+  need((brevoKey || transport) && mailFrom && appUrl, 'Email recovery is unavailable. Contact the shop.', 503);
   const user = await get('SELECT id,email FROM users WHERE email=? AND active=1', address);
   if (!user) return;
   const secret = token();
+  const key = digest(secret);
+  const url = new URL('/?reset=' + secret, appUrl);
   await atomic(async () => {
-    await run('DELETE FROM resets WHERE userId=? OR expires<=?', user.id, Date.now());
-    await run('INSERT INTO resets VALUES(?,?,?)', digest(secret), user.id, Date.now() + 1800000);
+    await run('DELETE FROM resets WHERE expires<=?', Date.now());
+    await run('INSERT INTO resets VALUES(?,?,?)', key, user.id, Date.now() + 1800000);
   });
-  const url = new URL('/?reset=' + secret, process.env.APP_URL);
-  await transport.sendMail({ from: process.env.MAIL_FROM, to: user.email, subject: 'Reset your RackTrail password',
-    text: `Open this link within 30 minutes to reset your RackTrail password: ${url}` });
+  try {
+    await sendResetEmail(user.email, url);
+  } catch (error) {
+    await run('DELETE FROM resets WHERE token=?', key);
+    console.error('Password reset delivery failed:', /^Brevo returned HTTP \d+$/.test(error.message) ? error.message : 'Mail provider unavailable');
+  }
 });
 route('post', '/reset', null, async req => {
   limit(req);
@@ -184,7 +216,7 @@ route('patch', '/profile', roles, async req => await atomic(async () => {
   const [name, addressEmail, address, phone] = details(req.body);
   need(!await get('SELECT id FROM users WHERE email=? AND id<>?', addressEmail, req.user.id), 'This email is already registered.', 409);
   if (addressEmail !== req.user.email) {
-    need(verify(field(req.body, 'current password', 128), (await get('SELECT password FROM users WHERE id=?', req.user.id)).password),
+    need(verifyCurrentPassword(req.body, (await get('SELECT password FROM users WHERE id=?', req.user.id)).password),
       'Enter your current password to change your email.');
     await run('DELETE FROM resets WHERE userId=?', req.user.id);
   }
@@ -193,7 +225,7 @@ route('patch', '/profile', roles, async req => await atomic(async () => {
 }));
 route('patch', '/password', roles, async req => await atomic(async () => {
   const current = await get('SELECT password FROM users WHERE id=?', req.user.id);
-  need(verify(field(req.body, 'current password', 128), current.password), 'Current password is incorrect.');
+  need(verifyCurrentPassword(req.body, current.password), 'Current password is incorrect.');
   await run('UPDATE users SET password=? WHERE id=?', newPassword(req.body), req.user.id);
   await run('DELETE FROM sessions WHERE userId=? AND token<>?', req.user.id, digest(req.token));
   await run('DELETE FROM resets WHERE userId=?', req.user.id);
