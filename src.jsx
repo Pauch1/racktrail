@@ -66,19 +66,29 @@ function App() {
         if (loadingSession) {
           setUser(data.id ? data : null);
           const next = currentPage();
-          if (!data.id && next && !publicPages.includes(next) && !location.search) {
-            history.replaceState(null, '', '#Login');
-            setPage('Login');
-            setNotice('Please log in to open that page.');
+          const hasReset = Boolean(new URLSearchParams(location.search).get('reset'));
+          if (!data.id) {
+            clearPortal();
+            setLoginRole('customer');
+            if (next && !publicPages.includes(next) && !hasReset) {
+              history.replaceState(null, '', '#Home');
+              setPage('Home');
+            }
           }
         } else if (data.id !== activeUserId || data.role !== activeRole) {
           clearPortal();
-          const next = data.id ? 'Dashboard' : 'Login';
-          if (!data.id) setLoginRole(activeRole);
-          history.replaceState(null, '', pathFor(next));
-          setPage(next);
-          setNotice(data.id ? 'The signed-in account changed in another tab.' : 'Your session ended. Please log in again.');
-          setUser(data.id ? data : null);
+          if (data.id) {
+            history.replaceState(null, '', pathFor('Dashboard'));
+            setPage('Dashboard');
+            setNotice('The signed-in account changed in another tab.');
+            setUser(data);
+          } else {
+            setLoginRole('customer');
+            history.replaceState(null, '', '#Home');
+            setPage('Home');
+            setNotice('Your session ended. Please log in again.');
+            setUser(null);
+          }
           window.scrollTo(0, 0);
         }
       } catch (error) {
@@ -103,6 +113,12 @@ function App() {
       document.removeEventListener('visibilitychange', checkSession);
     };
   }, [activeUserId, activeRole, loadingSession, clearPortal]);
+  useEffect(() => {
+    if (user === null && !resetToken && page && !publicPages.includes(page)) {
+      history.replaceState(null, '', '#Home');
+      setPage('Home');
+    }
+  }, [user, resetToken, page]);
   function logout() {
     endSession(async () => {
       try {

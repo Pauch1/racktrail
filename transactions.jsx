@@ -72,7 +72,7 @@ function TransactionDetail({row,shop,refresh,onClose}) {
         }}>{gcash ? 'Reject Payment' : 'Reject Booking'}</Button>}
         {row.status==='Pending' && row.kind==='Reserve' && currentDate <= row.due && (!gcash || row.payment==='Verified') &&
           <Button secondary disabled={state.busy} onClick={() => act(update('reserve'))}>Confirm Reservation</Button>}
-        {open && row.payment==='Verified' && withinBookedDates &&
+        {open && row.payment==='Verified' &&
           <Button disabled={state.busy} onClick={() => act(update('release'))}>Release Item</Button>}
       </div>}
       {shop && pendingPayment && !gcash && !withinBookedDates && <p>Cash payment can be recorded within the booked dates.</p>}

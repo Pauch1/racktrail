@@ -209,21 +209,34 @@ route('post', '/forgot', null, async req => {
   need((brevoKey || transport) && mailFrom && appUrl, 'Email recovery is unavailable. Contact the shop.', 503);
   const secret = token();
   const key = digest(secret);
+  const lifetime = 1800000;
   const url = new URL('/?reset=' + secret, appUrl);
-  const user = await atomic(async () => {
-    const account = await get('SELECT id,email FROM users WHERE email=? AND active=1', address);
-    if (!account) return;
-    await run('DELETE FROM resets WHERE expires<=?', Date.now());
-    await run('INSERT INTO resets VALUES(?,?,?)', key, account.id, Date.now() + 1800000);
-    return account;
+  const account = await atomic(async () => {
+    const user = await get('SELECT id,email FROM users WHERE email=? AND active=1', address);
+    if (!user) return;
+    const current = Date.now();
+    await run('DELETE FROM resets WHERE expires BETWEEN ? AND ? OR (userId=? AND expires<0)',
+      -current, current, user.id);
+    // Negative expiry reserves the latest delivery without making the link redeemable.
+    await run('INSERT INTO resets VALUES(?,?,?)', key, user.id, -(current + lifetime));
+    return user;
   });
-  if (!user) return;
+  if (!account) return;
   try {
-    await sendResetEmail(user.email, url);
+    await sendResetEmail(account.email, url);
   } catch (error) {
-    await run('DELETE FROM resets WHERE token=?', key);
+    await run('DELETE FROM resets WHERE token=? AND expires<0', key);
     console.error('Password reset delivery failed:', /^Brevo returned HTTP \d+$/.test(error.message) ? error.message : 'Mail provider unavailable');
+    return;
   }
+  await atomic(async () => {
+    const current = Date.now();
+    const pending = await get('SELECT token FROM resets WHERE token=? AND userId=? AND expires<?',
+      key, account.id, -current);
+    if (!pending) return;
+    await run('UPDATE resets SET expires=? WHERE token=?', current + lifetime, key);
+    await run('DELETE FROM resets WHERE userId=? AND token<>?', account.id, key);
+  });
 });
 route('post', '/reset', null, async req => {
   limit(req);
@@ -242,7 +255,7 @@ route('patch', '/profile', roles, async req => await atomic(async () => {
   need(!await get('SELECT id FROM users WHERE email=? AND id<>?', addressEmail, req.user.id), 'This email is already registered.', 409);
   if (addressEmail !== req.user.email) {
     need(verifyCurrentPassword(req.body, (await get('SELECT password FROM users WHERE id=?', req.user.id)).password),
-      'Enter your current password to change your email.');
+      'Enter a valid current password (up to 128 characters).');
     await run('DELETE FROM resets WHERE userId=?', req.user.id);
   }
   await run('UPDATE users SET name=?,email=?,address=?,phone=? WHERE id=?', name, addressEmail, address, phone, req.user.id);
@@ -465,7 +478,7 @@ route('get', '/notifications', roles, async req => {
     const paymentDecision = row.method === 'GCash' ? 'GCash payment verified' : 'Cash payment recorded';
     let text;
     if (row.status === 'Active') {
-      text = `${booking} is ${row.due < today ? 'overdue' : 'due ' + row.due}.`;
+      text = `${row.itemName} is ${row.due < today ? 'overdue' : 'due ' + row.due}.`;
     } else if (row.status === 'Rejected') {
       text = row.method === 'GCash' ? `GCash payment for ${booking} was rejected.` : `The shop declined the request for ${booking}.`;
     } else if (row.due < today) {
@@ -474,7 +487,9 @@ route('get', '/notifications', roles, async req => {
       text = `Reservation confirmed for ${booking}. Pickup starts ${row.start}.`;
       if (row.payment === 'Verified') text += ` ${paymentDecision}.`;
     } else if (row.payment === 'Verified') {
-      text = `${paymentDecision} for ${booking}.`;
+      text = row.method === 'GCash'
+        ? `${row.itemName} GCash payment: verified.`
+        : `${paymentDecision} for ${booking}.`;
     } else if (row.method === 'GCash') {
       text = `GCash payment for ${booking} is awaiting review.`;
     } else {
